@@ -1,0 +1,530 @@
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml	1970-01-01 00:00:00.000000000 +0000
++++ b/.github/workflows/ci.yml	2026-10-14 16:20:08.493924744 +0000
+@@ -0,0 +1,30 @@
++name: CI
++
++on:
++  push:
++    branches: ["main"]
++  pull_request:
++    branches: ["main"]
++
++jobs:
++  frontend:
++    runs-on: ubuntu-latest
++    defaults: { run: { working-directory: frontend } }
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with: { node-version: 20, cache: npm, cache-dependency-path: frontend/package-lock.json }
++      - run: npm ci
++      - run: npm run lint
++      - run: npm run build
++
++  backend:
++    runs-on: ubuntu-latest
++    defaults: { run: { working-directory: backend } }
++    steps:
++      - uses: actions/checkout@v4
++      - uses: actions/setup-node@v4
++        with: { node-version: 20, cache: npm, cache-dependency-path: backend/package-lock.json }
++      - run: npm ci
++      - run: npx prisma validate
++        env: { DATABASE_URL: "postgresql://user:pass@localhost:5432/db" }
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/.github/workflows/deno.yml b/.github/workflows/deno.yml
+--- a/.github/workflows/deno.yml	2026-07-27 17:56:14.000000000 +0000
++++ b/.github/workflows/deno.yml	1970-01-01 00:00:00.000000000 +0000
+@@ -1,42 +0,0 @@
+-# This workflow uses actions that are not certified by GitHub.
+-# They are provided by a third-party and are governed by
+-# separate terms of service, privacy policy, and support
+-# documentation.
+-
+-# This workflow will install Deno then run `deno lint` and `deno test`.
+-# For more information see: https://github.com/denoland/setup-deno
+-
+-name: Deno
+-
+-on:
+-  push:
+-    branches: ["main"]
+-  pull_request:
+-    branches: ["main"]
+-
+-permissions:
+-  contents: read
+-
+-jobs:
+-  test:
+-    runs-on: ubuntu-latest
+-
+-    steps:
+-      - name: Setup repo
+-        uses: actions/checkout@v4
+-
+-      - name: Setup Deno
+-        # uses: denoland/setup-deno@v1
+-        uses: denoland/setup-deno@61fe2df320078202e33d7d5ad347e7dcfa0e8f31  # v1.1.2
+-        with:
+-          deno-version: v1.x
+-
+-      # Uncomment this step to verify the use of 'deno fmt' on each commit.
+-      # - name: Verify formatting
+-      #   run: deno fmt --check
+-
+-      - name: Run linter
+-        run: deno lint
+-
+-      - name: Run tests
+-        run: deno test -A
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/.github/workflows/npm-publish-github-packages.yml b/.github/workflows/npm-publish-github-packages.yml
+--- a/.github/workflows/npm-publish-github-packages.yml	2026-07-27 17:56:14.000000000 +0000
++++ b/.github/workflows/npm-publish-github-packages.yml	1970-01-01 00:00:00.000000000 +0000
+@@ -1,36 +0,0 @@
+-# This workflow will run tests using node and then publish a package to GitHub Packages when a release is created
+-# For more information see: https://docs.github.com/en/actions/publishing-packages/publishing-nodejs-packages
+-
+-name: Node.js Package
+-
+-on:
+-  release:
+-    types: [created]
+-
+-jobs:
+-  build:
+-    runs-on: ubuntu-latest
+-    steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
+-        with:
+-          node-version: 20
+-      - run: npm ci
+-      - run: npm test
+-
+-  publish-gpr:
+-    needs: build
+-    runs-on: ubuntu-latest
+-    permissions:
+-      contents: read
+-      packages: write
+-    steps:
+-      - uses: actions/checkout@v4
+-      - uses: actions/setup-node@v4
+-        with:
+-          node-version: 20
+-          registry-url: https://npm.pkg.github.com/
+-      - run: npm ci
+-      - run: npm publish
+-        env:
+-          NODE_AUTH_TOKEN: ${{secrets.GITHUB_TOKEN}}
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/backend/prisma/migrations/20260726161335_init/migration.sql b/backend/prisma/migrations/20260726161335_init/migration.sql
+--- a/backend/prisma/migrations/20260726161335_init/migration.sql	2026-07-27 17:56:14.000000000 +0000
++++ b/backend/prisma/migrations/20260726161335_init/migration.sql	2026-10-14 16:19:20.414228384 +0000
+@@ -1,150 +1,160 @@
++-- Postgres-compatible init migration (original was generated against SQLite)
+ -- CreateTable
+ CREATE TABLE "User" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "name" TEXT NOT NULL,
+     "email" TEXT NOT NULL,
+     "passwordHash" TEXT NOT NULL,
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+-    "updatedAt" DATETIME NOT NULL
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++    CONSTRAINT "User_pkey" PRIMARY KEY ("id")
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "Card" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "userId" TEXT NOT NULL,
+     "cardType" TEXT NOT NULL,
+     "bank" TEXT NOT NULL,
+     "network" TEXT NOT NULL,
+     "last4" TEXT NOT NULL,
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "Card_pkey" PRIMARY KEY ("id"),
+     CONSTRAINT "Card_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "Transaction" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "userId" TEXT NOT NULL,
+     "cardId" TEXT,
+     "merchant" TEXT NOT NULL,
+     "logo" TEXT,
+-    "amount" REAL NOT NULL,
++    "amount" DOUBLE PRECISION NOT NULL,
+     "category" TEXT NOT NULL,
+-    "date" DATETIME NOT NULL,
++    "date" TIMESTAMP(3) NOT NULL,
+     "cardUsed" TEXT NOT NULL,
+     "cardLast4" TEXT NOT NULL,
+     "location" TEXT,
+     "paymentMode" TEXT,
+     "detectedBenefit" TEXT,
+-    "benefitValue" REAL DEFAULT 0,
++    "benefitValue" DOUBLE PRECISION DEFAULT 0,
+     "hasBenefit" BOOLEAN NOT NULL DEFAULT false,
+     "status" TEXT NOT NULL DEFAULT 'Detected',
+-    "claimDeadline" DATETIME,
++    "claimDeadline" TIMESTAMP(3),
+     "confidenceScore" INTEGER DEFAULT 0,
+-    "coverageLimit" REAL DEFAULT 0,
++    "coverageLimit" DOUBLE PRECISION DEFAULT 0,
+     "reasoningChain" TEXT,
+     "receiptUrl" TEXT,
+     "notes" TEXT,
+     "source" TEXT NOT NULL DEFAULT 'manual',
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "Transaction_pkey" PRIMARY KEY ("id"),
+     CONSTRAINT "Transaction_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+     CONSTRAINT "Transaction_cardId_fkey" FOREIGN KEY ("cardId") REFERENCES "Card" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "BenefitPolicy" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "title" TEXT NOT NULL,
+     "category" TEXT NOT NULL,
+     "description" TEXT NOT NULL,
+-    "maxCoverage" REAL NOT NULL,
++    "maxCoverage" DOUBLE PRECISION NOT NULL,
+     "coverageWindowDays" INTEGER NOT NULL,
+     "eligibleCards" TEXT NOT NULL,
+     "requiredDocs" TEXT NOT NULL,
+     "iconName" TEXT,
+     "activeCount" INTEGER NOT NULL DEFAULT 0,
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "BenefitPolicy_pkey" PRIMARY KEY ("id")
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "RuleDefinition" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "name" TEXT NOT NULL,
+     "active" BOOLEAN NOT NULL DEFAULT true,
+     "ifCategory" TEXT NOT NULL,
+-    "ifMinAmount" REAL NOT NULL,
++    "ifMinAmount" DOUBLE PRECISION NOT NULL,
+     "ifCard" TEXT NOT NULL,
+     "ifBank" TEXT,
+     "thenBenefitTitle" TEXT NOT NULL,
+     "thenCoveragePct" INTEGER NOT NULL DEFAULT 100,
+     "coverageDays" INTEGER NOT NULL DEFAULT 90,
+     "description" TEXT,
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+-    "updatedAt" DATETIME NOT NULL
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++    CONSTRAINT "RuleDefinition_pkey" PRIMARY KEY ("id")
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "MatchedBenefit" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "transactionId" TEXT NOT NULL,
+     "benefitPolicyId" TEXT,
+     "ruleId" TEXT,
+     "reason" TEXT NOT NULL,
+     "confidenceScore" INTEGER NOT NULL,
+     "coverageWindowDays" INTEGER NOT NULL,
+-    "coverageLimit" REAL NOT NULL,
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "coverageLimit" DOUBLE PRECISION NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "MatchedBenefit_pkey" PRIMARY KEY ("id"),
+     CONSTRAINT "MatchedBenefit_transactionId_fkey" FOREIGN KEY ("transactionId") REFERENCES "Transaction" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+     CONSTRAINT "MatchedBenefit_benefitPolicyId_fkey" FOREIGN KEY ("benefitPolicyId") REFERENCES "BenefitPolicy" ("id") ON DELETE SET NULL ON UPDATE CASCADE
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "Claim" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "claimNumber" TEXT NOT NULL,
+     "userId" TEXT NOT NULL,
+     "transactionId" TEXT NOT NULL,
+     "merchant" TEXT NOT NULL,
+-    "amount" REAL NOT NULL,
++    "amount" DOUBLE PRECISION NOT NULL,
+     "benefitType" TEXT NOT NULL,
+     "cardUsed" TEXT NOT NULL,
+-    "dateSubmitted" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "dateSubmitted" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     "status" TEXT NOT NULL DEFAULT 'Claim Submitted',
+     "currentStepIndex" INTEGER NOT NULL DEFAULT 0,
+     "documentsAttached" TEXT NOT NULL DEFAULT '[]',
+-    "payoutAmount" REAL NOT NULL DEFAULT 0,
+-    "estimatedPayoutDate" DATETIME,
++    "payoutAmount" DOUBLE PRECISION NOT NULL DEFAULT 0,
++    "estimatedPayoutDate" TIMESTAMP(3),
+     "auditLog" TEXT NOT NULL DEFAULT '[]',
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+-    "updatedAt" DATETIME NOT NULL,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "updatedAt" TIMESTAMP(3) NOT NULL,
++    CONSTRAINT "Claim_pkey" PRIMARY KEY ("id"),
+     CONSTRAINT "Claim_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE,
+     CONSTRAINT "Claim_transactionId_fkey" FOREIGN KEY ("transactionId") REFERENCES "Transaction" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "Insight" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "userId" TEXT NOT NULL,
+     "type" TEXT NOT NULL,
+     "title" TEXT NOT NULL,
+     "description" TEXT NOT NULL,
+-    "amount" REAL,
++    "amount" DOUBLE PRECISION,
+     "actionText" TEXT,
+     "transactionId" TEXT,
+-    "timestamp" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "timestamp" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+     "read" BOOLEAN NOT NULL DEFAULT false,
++    CONSTRAINT "Insight_pkey" PRIMARY KEY ("id"),
+     CONSTRAINT "Insight_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+ );
+ 
+ -- CreateTable
+ CREATE TABLE "Upload" (
+-    "id" TEXT NOT NULL PRIMARY KEY,
++    "id" TEXT NOT NULL,
+     "userId" TEXT NOT NULL,
+     "filename" TEXT NOT NULL,
+     "fileType" TEXT NOT NULL,
+     "status" TEXT NOT NULL DEFAULT 'processed',
+     "recordsFound" INTEGER NOT NULL DEFAULT 0,
+     "matchedCount" INTEGER NOT NULL DEFAULT 0,
+-    "createdAt" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
++    CONSTRAINT "Upload_pkey" PRIMARY KEY ("id"),
+     CONSTRAINT "Upload_userId_fkey" FOREIGN KEY ("userId") REFERENCES "User" ("id") ON DELETE CASCADE ON UPDATE CASCADE
+ );
+ 
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/backend/src/config/env.js b/backend/src/config/env.js
+--- a/backend/src/config/env.js	2026-07-27 17:56:14.000000000 +0000
++++ b/backend/src/config/env.js	2026-10-14 16:20:08.492852064 +0000
+@@ -1,6 +1,10 @@
+ const path = require('path');
+ require('dotenv').config({ path: path.resolve(__dirname, '../../.env') });
+ 
++if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'change-this-secret')) {
++  throw new Error('JWT_SECRET must be set to a strong value in production');
++}
++
+ module.exports = {
+   port: Number(process.env.PORT) || 4000,
+   nodeEnv: process.env.NODE_ENV || 'development',
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/backend/src/middlewares/errorMiddleware.js b/backend/src/middlewares/errorMiddleware.js
+--- a/backend/src/middlewares/errorMiddleware.js	2026-07-27 17:56:14.000000000 +0000
++++ b/backend/src/middlewares/errorMiddleware.js	2026-10-14 16:20:08.490857524 +0000
+@@ -9,6 +9,12 @@
+ function errorMiddleware(err, req, res, next) {
+   let { statusCode, message, details } = err;
+ 
++  // Multer (file upload) errors have no statusCode and used to fall through as 500.
++  if (err.name === 'MulterError') {
++    statusCode = err.code === 'LIMIT_FILE_SIZE' ? 413 : 400;
++    message = err.code === 'LIMIT_FILE_SIZE' ? 'File too large (max 5 MB)' : err.message;
++  }
++
+   if (!statusCode) {
+     statusCode = 500;
+     message = message || 'Internal server error';
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/backend/src/services/claimService.js b/backend/src/services/claimService.js
+--- a/backend/src/services/claimService.js	2026-07-27 17:56:14.000000000 +0000
++++ b/backend/src/services/claimService.js	2026-10-14 16:20:08.492565128 +0000
+@@ -22,10 +22,25 @@
+   return claims.map(serialize);
+ }
+ 
++// Must mirror the 5-step tracker in frontend/src/components/ClaimsTrackerView.tsx
++const STEP_INDEX = {
++  Detected: 0,
++  Activated: 1,
++  'Claim Submitted': 2,
++  'Under Review': 3,
++  Approved: 4,
++  'Paid Out': 4,
++};
++const STATUS_FLOW = ['Claim Submitted', 'Under Review', 'Approved', 'Paid Out'];
++
+ async function submitClaim(userId, { transactionId, documentsAttached = [] }) {
++  if (!transactionId) throw ApiError.badRequest('transactionId is required');
+   const tx = await prisma.transaction.findFirst({ where: { id: transactionId, userId } });
+   if (!tx) throw ApiError.notFound('Transaction not found');
+ 
++  const existing = await prisma.claim.findFirst({ where: { transactionId, userId } });
++  if (existing) throw ApiError.conflict(`A claim (${existing.claimNumber}) already exists for this transaction`);
++
+   const claimNumber = `BF-${Date.now().toString(36).toUpperCase()}`;
+   const estimatedPayoutDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000);
+ 
+@@ -39,7 +54,7 @@
+       benefitType: tx.detectedBenefit || 'Purchase Protection',
+       cardUsed: tx.cardUsed,
+       status: 'Claim Submitted',
+-      currentStepIndex: 1,
++      currentStepIndex: STEP_INDEX['Claim Submitted'],
+       documentsAttached: safeStringify(documentsAttached),
+       payoutAmount: tx.benefitValue || 0,
+       estimatedPayoutDate,
+@@ -61,14 +76,16 @@
+   return serialize(claim);
+ }
+ 
+-const STATUS_FLOW = ['Claim Submitted', 'Under Review', 'Approved', 'Paid Out'];
+-
+ async function advanceClaim(userId, claimId, { status, message, actor = 'Adjuster' } = {}) {
+   const claim = await prisma.claim.findFirst({ where: { id: claimId, userId } });
+   if (!claim) throw ApiError.notFound('Claim not found');
+ 
+-  const nextStatus = status || STATUS_FLOW[Math.min(claim.currentStepIndex + 1, STATUS_FLOW.length - 1)];
+-  const nextIndex = STATUS_FLOW.indexOf(nextStatus);
++  if (status !== undefined && !(status in STEP_INDEX)) {
++    throw ApiError.badRequest(`Invalid status "${status}". Allowed: ${Object.keys(STEP_INDEX).join(', ')}`);
++  }
++  const currentFlowPos = STATUS_FLOW.indexOf(claim.status);
++  const nextStatus = status || STATUS_FLOW[Math.min(currentFlowPos + 1, STATUS_FLOW.length - 1)];
++  const nextIndex = STEP_INDEX[nextStatus];
+   const log = safeParse(claim.auditLog, []);
+   log.push({
+     timestamp: new Date().toISOString(),
+@@ -80,7 +97,7 @@
+     where: { id: claimId },
+     data: {
+       status: nextStatus,
+-      currentStepIndex: Math.max(nextIndex, 0),
++      currentStepIndex: nextIndex,
+       auditLog: safeStringify(log),
+     },
+   });
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/backend/src/services/transactionService.js b/backend/src/services/transactionService.js
+--- a/backend/src/services/transactionService.js	2026-07-27 17:56:14.000000000 +0000
++++ b/backend/src/services/transactionService.js	2026-10-14 16:20:08.491531821 +0000
+@@ -18,7 +18,7 @@
+     ...(category && category !== 'All' ? { category } : {}),
+     ...(status && status !== 'All' ? { status } : {}),
+     ...(search
+-      ? { merchant: { contains: search } }
++      ? { merchant: { contains: search, mode: 'insensitive' } }
+       : {}),
+   };
+   const transactions = await prisma.transaction.findMany({
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/backend/src/services/uploadService.js b/backend/src/services/uploadService.js
+--- a/backend/src/services/uploadService.js	2026-07-27 17:56:14.000000000 +0000
++++ b/backend/src/services/uploadService.js	2026-10-14 16:20:08.492693980 +0000
+@@ -30,16 +30,31 @@
+     throw ApiError.badRequest('Could not parse uploaded file. Ensure it is valid CSV or JSON.');
+   }
+ 
++  // Validate ALL rows before inserting anything, so a bad row can't leave a half-imported file.
++  const problems = [];
++  const valid = [];
++  rows.forEach((row, i) => {
++    const amount = Number(row.amount);
++    if (!row.merchant) problems.push(`Row ${i + 1}: merchant is missing`);
++    else if (row.amount === undefined || row.amount === '' || !Number.isFinite(amount) || amount <= 0)
++      problems.push(`Row ${i + 1}: amount "${row.amount}" is not a positive number`);
++    else if (row.date && Number.isNaN(new Date(row.date).getTime()))
++      problems.push(`Row ${i + 1}: date "${row.date}" is not a valid date`);
++    else valid.push({ row, amount });
++  });
++  if (problems.length) {
++    throw ApiError.badRequest('Upload rejected: fix these rows and try again', problems.slice(0, 20));
++  }
++
+   const created = [];
+   let matchedCount = 0;
+ 
+-  for (const row of rows) {
+-    if (!row.merchant || !row.amount) continue;
++  for (const { row, amount } of valid) {
+     const tx = await createTransaction(
+       userId,
+       {
+         merchant: row.merchant,
+-        amount: Number(row.amount),
++        amount,
+         category: row.category || 'Retail',
+         date: row.date,
+         cardUsed: row.cardUsed,
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/frontend/server.ts b/frontend/server.ts
+--- a/frontend/server.ts	2026-07-27 17:56:14.000000000 +0000
++++ b/frontend/server.ts	2026-10-14 16:20:08.493613012 +0000
+@@ -11,8 +11,6 @@
+   const PORT = Number(process.env.PORT) || 3001;
+   const backendBase = (process.env.BACKEND_URL || process.env.VITE_API_URL || 'http://127.0.0.1:4000').replace(/\/$/, '');
+ 
+-  app.use(express.json());
+-
+   // Initialize Gemini API client lazily / safely
+   let aiClient: GoogleGenAI | null = null;
+   const getAIClient = () => {
+@@ -23,7 +21,7 @@
+   };
+ 
+   // API 1: Analyze Transaction Policy
+-  app.post('/api/gemini/analyze-transaction', async (req, res) => {
++  app.post('/api/gemini/analyze-transaction', express.json(), async (req, res) => {
+     const { transaction } = req.body;
+     if (!transaction) {
+       return res.status(400).json({ error: 'Missing transaction payload' });
+@@ -52,7 +50,7 @@
+   });
+ 
+   // API 2: Copilot AI Chat
+-  app.post('/api/gemini/chat', async (req, res) => {
++  app.post('/api/gemini/chat', express.json(), async (req, res) => {
+     const { message } = req.body;
+     if (!message) {
+       return res.status(400).json({ error: 'Missing message' });
+@@ -93,8 +91,11 @@
+         headers,
+       };
+ 
+-      if (['POST', 'PUT', 'PATCH'].includes(req.method) && req.body) {
+-        options.body = JSON.stringify(req.body);
++      // Forward the raw bytes untouched so multipart/form-data (file uploads) survives the proxy.
++      if (['POST', 'PUT', 'PATCH'].includes(req.method)) {
++        const chunks: Buffer[] = [];
++        for await (const chunk of req) chunks.push(chunk as Buffer);
++        if (chunks.length) options.body = Buffer.concat(chunks);
+       }
+ 
+       const backendRes = await fetch(targetUrl, options);
+diff -ruN '--exclude=node_modules' '--exclude=dist' '--exclude=package-lock.json' '--exclude=bun.lock' '--exclude=.env' a/render.yaml b/render.yaml
+--- a/render.yaml	2026-07-27 17:56:14.000000000 +0000
++++ b/render.yaml	2026-10-14 16:20:08.492964956 +0000
+@@ -1,3 +1,8 @@
++databases:
++  - name: benefitflow-db
++    plan: free
++    databaseName: benefitflow
++
+ services:
+   - type: web
+     name: benefitflow-backend
+@@ -19,4 +24,6 @@
+       - key: CORS_ORIGIN
+         value: https://benefitflow.vercel.app
+       - key: DATABASE_URL
+-        value: postgresql://postgres:postgres@localhost:5432/benefitflow
++        fromDatabase:
++          name: benefitflow-db
++          property: connectionString
