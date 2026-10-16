@@ -1,0 +1,461 @@
+diff -ruNa a/.env.example b/.env.example
+--- a/.env.example	1970-01-01 00:00:00.000000000 +0000
++++ b/.env.example	2026-10-15 04:58:45.579487553 +0000
+@@ -0,0 +1,17 @@
++# Copy to .env
++PORT=3001
++NODE_ENV=development
++# REQUIRED in production: long random string (e.g. `openssl rand -hex 32`)
++JWT_SECRET=
++# Comma-separated list of allowed browser origins (empty = allow all, dev only)
++CORS_ORIGIN=http://localhost:3000
++FRONTEND_URL=http://localhost:3000
++DB_PATH=invoiceai.db
++# Optional: AI features
++CLAUDE_API_KEY=
++# Optional: Google sign-in
++GOOGLE_CLIENT_ID=
++GOOGLE_CLIENT_SECRET=
++GOOGLE_CALLBACK_URL=
++# Set true only if you really want the demo account in production
++SEED_DEMO=false
+diff -ruNa a/frontend/index.html b/frontend/index.html
+--- a/frontend/index.html	2026-06-11 12:44:27.000000000 +0000
++++ b/frontend/index.html	2026-10-15 04:58:45.573084855 +0000
+@@ -1938,7 +1938,9 @@
+         let payments = [];
+         let currentCompanyId = null;
+ 
+-       const API_URL = 'https://invoice-management-billing-software-production.up.railway.app/api/v1';
++       const API_URL = ['localhost','127.0.0.1'].includes(location.hostname)
++            ? 'http://localhost:3001/api/v1'   // local dev talks to the local server, not production
++            : 'https://invoice-management-billing-software-production.up.railway.app/api/v1';
+ 
+         // ===== INITIALIZATION =====
+         document.addEventListener('DOMContentLoaded', function() {
+diff -ruNa a/package.json b/package.json
+--- a/package.json	2026-06-11 12:44:27.000000000 +0000
++++ b/package.json	2026-10-15 04:58:45.578991917 +0000
+@@ -19,16 +19,10 @@
+   "dependencies": {
+     "bcryptjs": "^2.4.3",
+     "better-sqlite3": "^12.9.0",
+-    "body-parser": "^1.20.2",
+     "cors": "^2.8.6",
+     "dotenv": "^16.6.1",
+     "express": "^4.22.1",
+     "jsonwebtoken": "^9.0.3",
+-    "jwt-simple": "^0.5.6",
+-    "pg": "^8.11.0",
+-    "redis": "^4.6.0",
+-    "sqlite": "^5.0.1",
+-    "sqlite3": "^5.1.6",
+     "uuid": "^9.0.0"
+   },
+   "devDependencies": {
+diff -ruNa a/server.js b/server.js
+--- a/server.js	2026-06-11 12:44:27.000000000 +0000
++++ b/server.js	2026-10-15 04:58:45.571469506 +0000
+@@ -10,11 +10,19 @@
+ 
+ const app = express();
+ const PORT = process.env.PORT || 3001;
+-const JWT_SECRET = process.env.JWT_SECRET || 'invoiceai-secret-key-2024';
++const crypto = require('crypto');
++const IS_PROD = process.env.NODE_ENV === 'production';
++let JWT_SECRET = process.env.JWT_SECRET;
++if (!JWT_SECRET) {
++  if (IS_PROD) throw new Error('JWT_SECRET must be set in production');
++  JWT_SECRET = crypto.randomBytes(32).toString('hex');
++  console.warn('JWT_SECRET not set: using a random secret for this run (tokens reset on restart)');
++}
+ const CLAUDE_API_KEY = process.env.CLAUDE_API_KEY || '';
+ 
+ // ─── Middleware ───────────────────────────────────────────────────────────────
+-app.use(cors());
++const corsOrigins = (process.env.CORS_ORIGIN || '').split(',').map(o => o.trim()).filter(Boolean);
++app.use(cors(corsOrigins.length ? { origin: corsOrigins } : {}));
+ app.use(express.json({ limit: '10mb' }));
+ app.use(express.static(path.join(__dirname, 'frontend')));
+ 
+@@ -139,7 +147,8 @@
+   const ins = db.prepare('INSERT OR IGNORE INTO currency_rates (currency,rate_to_inr,symbol) VALUES (?,?,?)');
+   currencies.forEach(c => ins.run(...c));
+   
+-  // Create demo user with example data (if doesn't exist)
++  // Demo account (test@example.com / password123) is for local development only
++  if (IS_PROD && process.env.SEED_DEMO !== 'true') return;
+   try {
+     const hashedPassword = bcrypt.hashSync('password123', 10);
+     const userCheck = db.prepare('SELECT id FROM users WHERE email=?').get('test@example.com');
+@@ -239,18 +248,58 @@
+ };
+ 
+ const generateInvoiceNumber = (companyId) => {
+-  const cnt = db.prepare('SELECT COUNT(*) as c FROM invoices WHERE company_id=?').get(companyId).c;
+-  return `INV-${String(cnt+1).padStart(4,'0')}`;
++  // Company-scoped and collision-proof (invoice_number is globally UNIQUE)
++  let n = db.prepare('SELECT COUNT(*) as c FROM invoices WHERE company_id=?').get(companyId).c + 1;
++  const exists = db.prepare('SELECT 1 FROM invoices WHERE invoice_number=?');
++  let num;
++  do { num = `INV-${companyId}-${String(n++).padStart(4,'0')}`; } while (exists.get(num));
++  return num;
+ };
+ 
++const escapeHtml = (v) => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
++const round2 = (n) => Math.round(n * 100) / 100;
++const FREQUENCIES = ['weekly','monthly','quarterly','yearly'];
++const INVOICE_STATUSES = ['draft','sent','partial','paid','overdue'];
++
++const parseItems = (items) => {
++  if (!Array.isArray(items) || !items.length) return { error: 'items are required' };
++  const out = [];
++  for (let i = 0; i < items.length; i++) {
++    const it = items[i] || {};
++    const q = Number(it.quantity), r = Number(it.rate), t = Number(it.tax_rate ?? 0);
++    if (typeof it.description !== 'string' || !it.description.trim()) return { error: `items[${i}].description is required` };
++    if (!Number.isFinite(q) || q <= 0) return { error: `items[${i}].quantity must be greater than 0` };
++    if (!Number.isFinite(r) || r < 0) return { error: `items[${i}].rate must be 0 or more` };
++    if (!Number.isFinite(t) || t < 0 || t > 100) return { error: `items[${i}].tax_rate must be between 0 and 100` };
++    out.push({ description: it.description.trim(), quantity: q, rate: r, tax_rate: t });
++  }
++  return { items: out };
++};
++
++const parseMoneyFields = (body) => {
++  const tax = body.tax_rate === undefined || body.tax_rate === null ? null : Number(body.tax_rate);
++  const disc = body.discount_amount === undefined || body.discount_amount === null ? null : Number(body.discount_amount);
++  if (tax !== null && (!Number.isFinite(tax) || tax < 0 || tax > 100)) return { error: 'tax_rate must be between 0 and 100' };
++  if (disc !== null && (!Number.isFinite(disc) || disc < 0)) return { error: 'discount_amount must be 0 or more' };
++  return { tax, disc };
++};
++
++const addMonthsClamped = (d, months) => {
++  const day = d.getUTCDate();
++  d.setUTCDate(1);
++  d.setUTCMonth(d.getUTCMonth() + months);
++  const last = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
++  d.setUTCDate(Math.min(day, last));
++  return d;
++};
+ const calculateNextDate = (fromDate, interval) => {
+   const d = new Date(fromDate);
+   switch (interval) {
+-    case 'weekly':    d.setDate(d.getDate()+7); break;
+-    case 'monthly':   d.setMonth(d.getMonth()+1); break;
+-    case 'quarterly': d.setMonth(d.getMonth()+3); break;
+-    case 'yearly':    d.setFullYear(d.getFullYear()+1); break;
+-    default:          d.setMonth(d.getMonth()+1);
++    case 'weekly':    d.setUTCDate(d.getUTCDate() + 7); break;
++    case 'monthly':   addMonthsClamped(d, 1); break;
++    case 'quarterly': addMonthsClamped(d, 3); break;
++    case 'yearly':    addMonthsClamped(d, 12); break;
++    default:          addMonthsClamped(d, 1);
+   }
+   return d.toISOString().split('T')[0];
+ };
+@@ -285,6 +334,8 @@
+ 
+ // ─── PDF HTML Generator ───────────────────────────────────────────────────────
+ const generateInvoiceHTML = (invoice, company, client, items, totals) => {
++  const escObj = (o) => o && Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'string' ? escapeHtml(v) : v]));
++  invoice = escObj(invoice); company = escObj(company); client = escObj(client); items = items.map(escObj);
+   const sym = db.prepare('SELECT symbol FROM currency_rates WHERE currency=?').get(invoice.currency)?.symbol || '₹';
+   const fmt = n => `${sym}${Number(n).toLocaleString('en-IN',{minimumFractionDigits:2})}`;
+   const rows = items.map(i => `<tr><td>${i.description}</td><td style="text-align:center">${i.quantity}</td><td style="text-align:right">${fmt(i.rate)}</td><td style="text-align:right">${fmt(i.quantity*i.rate)}</td></tr>`).join('');
+@@ -341,52 +392,22 @@
+ // ═════════════════════════════════════════════════════════════════════════════
+ app.post('/api/v1/auth/signup', (req, res) => {
+   try {
+-    const { email, password, name } = req.body;
++    const { password, name } = req.body;
++    const email = typeof req.body.email === 'string' ? req.body.email.toLowerCase().trim() : '';
+     if (!email || !password || !name) return res.status(400).json({ error: 'Email, password, and name are required' });
++    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: 'Invalid email address' });
++    if (typeof password !== 'string' || password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
++    if (db.prepare('SELECT id FROM users WHERE lower(email)=?').get(email)) return res.status(409).json({ error: 'Email already exists' });
+ 
+     const hashedPassword = bcrypt.hashSync(password, 10);
+-    
+-    const result = db.prepare(
+-      'INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)'
+-    ).run(email, hashedPassword, name, 'user');
+-    
+-    const user = db.prepare('SELECT id, email, name, role FROM users WHERE id=?').get(result.lastInsertRowid);
+-    
+-    // Create example company
+-    const companyResult = db.prepare(
+-      'INSERT INTO companies (user_id, name, email, phone, address, city, state, gstin) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+-    ).run(user.id, name + "'s Company", email, '+91-9999999999', '123 Tech Park', 'Bangalore', 'Karnataka', '36AABCT1234H1Z0');
+-    const companyId = companyResult.lastInsertRowid;
+-    
+-    // Create example client
+-    const clientResult = db.prepare(
+-      'INSERT INTO clients (company_id, name, email, phone, city) VALUES (?, ?, ?, ?, ?)'
+-    ).run(companyId, 'Acme Corporation', 'contact@acme.com', '+91-9876543210', 'Mumbai');
+-    const clientId = clientResult.lastInsertRowid;
+-    
+-    // Create example invoice 1 - Sent
+-    const invoice1Result = db.prepare(
+-      'INSERT INTO invoices (user_id, company_id, client_id, invoice_number, issue_date, due_date, status, tax_rate, currency) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+-    ).run(user.id, companyId, clientId, 'INV-001', '2026-04-01', '2026-05-01', 'sent', 18, 'INR');
+-    const invoiceId1 = invoice1Result.lastInsertRowid;
+-    
+-    // Add items to invoice 1
+-    db.prepare('INSERT INTO invoice_items (invoice_id, description, quantity, rate) VALUES (?, ?, ?, ?)').run(invoiceId1, 'Web Development Services', 40, 1500);
+-    db.prepare('INSERT INTO invoice_items (invoice_id, description, quantity, rate) VALUES (?, ?, ?, ?)').run(invoiceId1, 'UI/UX Design', 10, 2000);
+-    
+-    // Create example invoice 2 - Paid
+-    const invoice2Result = db.prepare(
+-      'INSERT INTO invoices (user_id, company_id, client_id, invoice_number, issue_date, due_date, status, tax_rate, currency, total_paid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+-    ).run(user.id, companyId, clientId, 'INV-002', '2026-03-15', '2026-04-15', 'paid', 18, 'INR', 88200);
+-    const invoiceId2 = invoice2Result.lastInsertRowid;
+-    
+-    // Add items to invoice 2
+-    db.prepare('INSERT INTO invoice_items (invoice_id, description, quantity, rate) VALUES (?, ?, ?, ?)').run(invoiceId2, 'Mobile App Development', 80, 2000);
+-    db.prepare('INSERT INTO invoice_items (invoice_id, description, quantity, rate) VALUES (?, ?, ?, ?)').run(invoiceId2, 'Bug Fixes & Support', 20, 1000);
+-    
+-    // Add payment record for invoice 2
+-    db.prepare('INSERT INTO payments (invoice_id, user_id, amount, payment_date, payment_method, status) VALUES (?, ?, ?, ?, ?, ?)').run(invoiceId2, user.id, 88200, '2026-04-10', 'bank_transfer', 'completed');
+-    
++    // One transaction: either the user AND their company exist, or nothing is saved
++    const user = db.transaction(() => {
++      const result = db.prepare('INSERT INTO users (email, password, name, role) VALUES (?, ?, ?, ?)').run(email, hashedPassword, name, 'user');
++      const u = db.prepare('SELECT id, email, name, role FROM users WHERE id=?').get(result.lastInsertRowid);
++      db.prepare('INSERT INTO companies (user_id, name, email) VALUES (?, ?, ?)').run(u.id, name + "'s Company", email);
++      return u;
++    })();
++
+     const token = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+     res.status(201).json({ token, user });
+   } catch(err) {
+@@ -401,7 +422,7 @@
+   if (!email || !password) return res.status(400).json({ error: 'Email and password are required' });
+   
+   try {
+-    const user = db.prepare('SELECT * FROM users WHERE email=?').get(email);
++    const user = db.prepare('SELECT * FROM users WHERE lower(email)=?').get(String(email).toLowerCase().trim());
+     
+     if (!user || !bcrypt.compareSync(password, user.password)) {
+       return res.status(401).json({ error: 'Invalid credentials' });
+@@ -464,7 +485,7 @@
+       db.prepare('INSERT INTO users (email,name,password,role) VALUES (?,?,?,?)').run(
+         googleUser.email,
+         googleUser.name,
+-        bcrypt.hashSync('google-oauth-' + googleUser.id, 10),
++        bcrypt.hashSync(crypto.randomBytes(32).toString('hex'), 10),
+         'user'
+       );
+       user = db.prepare('SELECT * FROM users WHERE email=?').get(googleUser.email);
+@@ -474,7 +495,7 @@
+     const jwtToken = jwt.sign({ id: user.id, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+ 
+     // Redirect to frontend with token
+-    res.redirect(`http://localhost:3000?token=${jwtToken}&user=${encodeURIComponent(JSON.stringify({ id: user.id, email: user.email, name: user.name }))}`);
++    res.redirect(`${process.env.FRONTEND_URL || 'http://localhost:3000'}?token=${jwtToken}&user=${encodeURIComponent(JSON.stringify({ id: user.id, email: user.email, name: user.name }))}`);
+   } catch (error) {
+     console.error('Google OAuth error:', error);
+     res.status(500).json({ error: 'Authentication failed' });
+@@ -560,14 +581,23 @@
+   try {
+     const c = db.prepare('SELECT id FROM companies WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
+     if (!c) return res.status(403).json({ error:'Access denied' });
+-    const { client_id,issue_date,due_date,tax_rate,discount_amount,notes,items,currency,is_recurring,recurring_interval } = req.body;
++    const { client_id,issue_date,due_date,notes,items,currency,is_recurring,recurring_interval } = req.body;
+     if (!client_id||!issue_date||!due_date||!items?.length) return res.status(400).json({ error:'client_id, issue_date, due_date, and items are required' });
++    // The client must belong to THIS company (otherwise users could read other users' clients)
++    if (!db.prepare('SELECT id FROM clients WHERE id=? AND company_id=?').get(client_id, req.params.id)) return res.status(400).json({ error:'client_id does not belong to this company' });
++    if (Number.isNaN(Date.parse(issue_date)) || Number.isNaN(Date.parse(due_date))) return res.status(400).json({ error:'issue_date and due_date must be valid dates' });
++    if (is_recurring && !FREQUENCIES.includes(recurring_interval)) return res.status(400).json({ error:`recurring_interval must be one of: ${FREQUENCIES.join(', ')}` });
++    const parsed = parseItems(items); if (parsed.error) return res.status(400).json({ error: parsed.error });
++    const money = parseMoneyFields(req.body); if (money.error) return res.status(400).json({ error: money.error });
+     const invoice_number = generateInvoiceNumber(req.params.id);
+     const next_invoice_date = is_recurring ? calculateNextDate(due_date,recurring_interval) : null;
+-    const id = db.prepare('INSERT INTO invoices (user_id,company_id,client_id,invoice_number,issue_date,due_date,tax_rate,discount_amount,notes,currency,is_recurring,recurring_interval,next_invoice_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
+-      .run(req.user.id,req.params.id,client_id,invoice_number,issue_date,due_date,tax_rate??18,discount_amount??0,notes||null,currency||'INR',is_recurring?1:0,recurring_interval||null,next_invoice_date).lastInsertRowid;
+-    const ins = db.prepare('INSERT INTO invoice_items (invoice_id,description,quantity,rate,tax_rate) VALUES (?,?,?,?,?)');
+-    for (const item of items) ins.run(id,item.description,item.quantity,item.rate,item.tax_rate??0);
++    const id = db.transaction(() => {
++      const newId = db.prepare('INSERT INTO invoices (user_id,company_id,client_id,invoice_number,issue_date,due_date,tax_rate,discount_amount,notes,currency,is_recurring,recurring_interval,next_invoice_date) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)')
++        .run(req.user.id,req.params.id,client_id,invoice_number,issue_date,due_date,money.tax??18,money.disc??0,notes||null,currency||'INR',is_recurring?1:0,recurring_interval||null,next_invoice_date).lastInsertRowid;
++      const ins = db.prepare('INSERT INTO invoice_items (invoice_id,description,quantity,rate,tax_rate) VALUES (?,?,?,?,?)');
++      for (const item of parsed.items) ins.run(newId,item.description,item.quantity,item.rate,item.tax_rate);
++      return newId;
++    })();
+     res.status(201).json({ ...db.prepare('SELECT * FROM invoices WHERE id=?').get(id), ...computeTotal(id) });
+   } catch(err) {
+     console.error(err);
+@@ -586,27 +616,48 @@
+ });
+ 
+ app.put('/api/v1/invoices/:id', authenticate, (req,res) => {
+-  const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
+-  if (!inv) return res.status(404).json({ error:'Invoice not found' });
+-  const { due_date,tax_rate,discount_amount,notes,status,items,currency } = req.body;
+-  db.prepare('UPDATE invoices SET due_date=COALESCE(?,due_date),tax_rate=COALESCE(?,tax_rate),discount_amount=COALESCE(?,discount_amount),notes=COALESCE(?,notes),status=COALESCE(?,status),currency=COALESCE(?,currency) WHERE id=?')
+-    .run(due_date||null,tax_rate??null,discount_amount??null,notes||null,status||null,currency||null,req.params.id);
+-  if (items?.length) {
+-    db.prepare('DELETE FROM invoice_items WHERE invoice_id=?').run(req.params.id);
+-    const ins = db.prepare('INSERT INTO invoice_items (invoice_id,description,quantity,rate,tax_rate) VALUES (?,?,?,?,?)');
+-    for (const item of items) ins.run(req.params.id,item.description,item.quantity,item.rate,item.tax_rate??0);
++  try {
++    const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
++    if (!inv) return res.status(404).json({ error:'Invoice not found' });
++    const { due_date,notes,status,items,currency } = req.body;
++    if (status && !INVOICE_STATUSES.includes(status)) return res.status(400).json({ error:`status must be one of: ${INVOICE_STATUSES.join(', ')}` });
++    if (due_date && Number.isNaN(Date.parse(due_date))) return res.status(400).json({ error:'due_date must be a valid date' });
++    const money = parseMoneyFields(req.body); if (money.error) return res.status(400).json({ error: money.error });
++    let parsed = null;
++    if (items?.length) { parsed = parseItems(items); if (parsed.error) return res.status(400).json({ error: parsed.error }); }
++    db.transaction(() => {
++      db.prepare('UPDATE invoices SET due_date=COALESCE(?,due_date),tax_rate=COALESCE(?,tax_rate),discount_amount=COALESCE(?,discount_amount),notes=COALESCE(?,notes),status=COALESCE(?,status),currency=COALESCE(?,currency) WHERE id=?')
++        .run(due_date||null,money.tax,money.disc,notes||null,status||null,currency||null,req.params.id);
++      if (parsed) {
++        db.prepare('DELETE FROM invoice_items WHERE invoice_id=?').run(req.params.id);
++        const ins = db.prepare('INSERT INTO invoice_items (invoice_id,description,quantity,rate,tax_rate) VALUES (?,?,?,?,?)');
++        for (const item of parsed.items) ins.run(req.params.id,item.description,item.quantity,item.rate,item.tax_rate);
++      }
++    })();
++    const u = db.prepare('SELECT * FROM invoices WHERE id=?').get(req.params.id);
++    res.json({ ...u, ...computeTotal(u.id) });
++  } catch(err) {
++    console.error(err);
++    res.status(500).json({ error: 'Server error' });
+   }
+-  const u = db.prepare('SELECT * FROM invoices WHERE id=?').get(req.params.id);
+-  res.json({ ...u, ...computeTotal(u.id) });
+ });
+ 
+ app.delete('/api/v1/invoices/:id', authenticate, (req,res) => {
+-  const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
+-  if (!inv) return res.status(404).json({ error:'Invoice not found' });
+-  db.prepare('DELETE FROM invoice_items WHERE invoice_id=?').run(req.params.id);
+-  db.prepare('DELETE FROM payments WHERE invoice_id=?').run(req.params.id);
+-  db.prepare('DELETE FROM invoices WHERE id=?').run(req.params.id);
+-  res.json({ message:'Invoice deleted successfully' });
++  try {
++    const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
++    if (!inv) return res.status(404).json({ error:'Invoice not found' });
++    // Never silently destroy payment history
++    const paymentCount = db.prepare('SELECT COUNT(*) c FROM payments WHERE invoice_id=?').get(req.params.id).c;
++    if (paymentCount > 0) return res.status(409).json({ error:'Invoice has recorded payments and cannot be deleted' });
++    db.transaction(() => {
++      db.prepare('DELETE FROM invoice_items WHERE invoice_id=?').run(req.params.id);
++      db.prepare('DELETE FROM invoices WHERE id=?').run(req.params.id);
++    })();
++    res.json({ message:'Invoice deleted successfully' });
++  } catch(err) {
++    console.error(err);
++    res.status(500).json({ error: 'Server error' });
++  }
+ });
+ 
+ app.post('/api/v1/invoices/:id/send', authenticate, (req,res) => {
+@@ -624,15 +675,21 @@
+   try {
+     const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
+     if (!inv) return res.status(404).json({ error:'Invoice not found' });
+-    const { total } = computeTotal(inv.id);
+-    db.prepare("UPDATE invoices SET status='paid',total_paid=? WHERE id=?").run(total,req.params.id);
++    const total = round2(computeTotal(inv.id).total);
++    const remaining = round2(total - (inv.total_paid||0));
++    db.transaction(() => {
++      // Keep the payment ledger in sync with total_paid
++      if (remaining > 0) db.prepare("INSERT INTO payments (invoice_id,user_id,amount,payment_date,payment_method,reference) VALUES (?,?,?,?,?,?)")
++        .run(inv.id, req.user.id, remaining, new Date().toISOString().split('T')[0], 'manual', 'mark-paid');
++      db.prepare("UPDATE invoices SET status='paid',total_paid=? WHERE id=?").run(total,req.params.id);
++    })();
+     res.json({ message:'Invoice marked as paid', amount:total });
+   } catch(err) {
+     res.status(500).json({ error: 'Server error' });
+   }
+ });
+ 
+-// ─── PDF Export ───────────────────────────────────────────────────────────────
++// PDF Export
+ app.get('/api/v1/invoices/:id/pdf', authenticate, (req,res) => {
+   try {
+     const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
+@@ -696,7 +753,7 @@
+     if (!invoice) return res.status(404).json({ error: 'Invoice not found' });
+ 
+     const { frequency } = req.body;
+-    if (!frequency) return res.status(400).json({ error: 'Frequency required' });
++    if (!FREQUENCIES.includes(frequency)) return res.status(400).json({ error: `frequency must be one of: ${FREQUENCIES.join(', ')}` });
+ 
+     const nextDate = calculateNextDate(invoice.due_date || new Date().toISOString().split('T')[0], frequency);
+     db.prepare('UPDATE invoices SET is_recurring = 1, recurring_interval = ?, next_invoice_date = ? WHERE id = ?')
+@@ -746,23 +803,29 @@
+   try {
+     const inv = db.prepare('SELECT * FROM invoices WHERE id=? AND user_id=?').get(req.params.id,req.user.id);
+     if (!inv) return res.status(404).json({ error:'Invoice not found' });
+-    const { amount,payment_date,payment_method,reference } = req.body;
+-    if (!amount||!payment_date) return res.status(400).json({ error:'Amount and payment_date are required' });
+-    const r = db.prepare('INSERT INTO payments (invoice_id,user_id,amount,payment_date,payment_method,reference) VALUES (?,?,?,?,?,?)')
+-      .run(req.params.id,req.user.id,amount,payment_date,payment_method||'bank_transfer',reference||null);
+-    const newPaid = (inv.total_paid||0) + amount;
+-    const { total } = computeTotal(inv.id);
+-    db.prepare('UPDATE invoices SET total_paid=?,status=? WHERE id=?').run(newPaid,newPaid>=total?'paid':'partial',req.params.id);
+-    res.status(201).json(db.prepare('SELECT * FROM payments WHERE id=?').get(r.lastInsertRowid));
++    const { payment_date,payment_method,reference } = req.body;
++    const amount = Number(req.body.amount);
++    if (!Number.isFinite(amount) || amount <= 0) return res.status(400).json({ error:'amount must be a positive number' });
++    if (!payment_date || Number.isNaN(Date.parse(payment_date))) return res.status(400).json({ error:'A valid payment_date is required' });
++    const amt = round2(amount);
++    const total = round2(computeTotal(inv.id).total);
++    const due = round2(total - (inv.total_paid||0));
++    if (amt > due + 0.005) return res.status(400).json({ error:`Payment exceeds the balance due (${due})` });
++    const paymentId = db.transaction(() => {
++      const r = db.prepare('INSERT INTO payments (invoice_id,user_id,amount,payment_date,payment_method,reference) VALUES (?,?,?,?,?,?)')
++        .run(req.params.id,req.user.id,amt,payment_date,payment_method||'bank_transfer',reference||null);
++      const newPaid = round2((inv.total_paid||0) + amt);
++      db.prepare('UPDATE invoices SET total_paid=?,status=? WHERE id=?').run(newPaid,newPaid>=total?'paid':'partial',req.params.id);
++      return r.lastInsertRowid;
++    })();
++    res.status(201).json(db.prepare('SELECT * FROM payments WHERE id=?').get(paymentId));
+   } catch(err) {
+     console.error(err);
+     res.status(500).json({ error: 'Server error' });
+   }
+ });
+ 
+-// ═════════════════════════════════════════════════════════════════════════════
+ // MULTI-CURRENCY
+-// ═════════════════════════════════════════════════════════════════════════════
+ app.get('/api/v1/currencies', authenticate, (req,res) => res.json(db.prepare('SELECT * FROM currency_rates ORDER BY currency').all()));
+ 
+ app.get('/api/v1/currencies/convert', authenticate, (req,res) => {
+@@ -785,14 +848,16 @@
+   const ph = ids.map(()=>'?').join(',');
+   const invoices = db.prepare(`SELECT * FROM invoices WHERE company_id IN (${ph})`).all(...ids);
+   const today = new Date().toISOString().split('T')[0];
+-  let totalRevenue=0,pending=0,overdue=0,paid=0;
++  let totalRevenue=0,pending=0,overdue=0,paid=0,partial=0,collected=0;
+   for (const inv of invoices) {
+     const { total } = computeTotal(inv.id);
++    collected += inv.total_paid||0;
+     if (inv.status==='paid') { totalRevenue+=total; paid++; }
+-    else if (inv.status==='sent'&&inv.due_date<today) overdue++;
++    else if (['sent','partial'].includes(inv.status)&&inv.due_date<today) overdue++;
++    else if (inv.status==='partial') partial++;
+     else if (['draft','sent'].includes(inv.status)) pending++;
+   }
+-  res.json({ total_invoices:invoices.length,total_revenue:totalRevenue,pending,overdue,paid,
++  res.json({ total_invoices:invoices.length,total_revenue:totalRevenue,collected,pending,overdue,paid,partial,
+     total_clients:db.prepare(`SELECT COUNT(*) as cnt FROM clients WHERE company_id IN (${ph})`).get(...ids).cnt });
+ });
+ 
+@@ -834,7 +899,12 @@
+   const full = invoices.map(inv=>({ ...inv, ...computeTotal(inv.id) }));
+   if (format==='csv') {
+     const headers = ['invoice_number','client_name','issue_date','due_date','status','currency','subtotal','tax','total'];
+-    const rows = full.map(inv=>headers.map(h=>JSON.stringify(inv[h]??'')).join(','));
++    const csvCell = (v) => {
++      let t = String(v ?? '');
++      if (typeof v !== 'number' && /^[=+\-@\t\r]/.test(t)) t = "'" + t; // block spreadsheet formula injection
++      return `"${t.replace(/"/g,'""')}"`;                              // RFC 4180 quoting
++    };
++    const rows = full.map(inv=>headers.map(h=>csvCell(inv[h])).join(','));
+     res.setHeader('Content-Type','text/csv');
+     res.setHeader('Content-Disposition','attachment; filename="invoices.csv"');
+     return res.send([headers.join(','),...rows].join('\n'));
